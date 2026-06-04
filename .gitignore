@@ -1,0 +1,13 @@
+# Rust build output (Cargo.lock IS committed — this is a binary crate)
+/target
+
+# Backtraces / cargo cruft
+**/*.rs.bk
+
+# Editor / OS cruft
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.DS_Store

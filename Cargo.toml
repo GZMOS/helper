@@ -1,0 +1,53 @@
+[package]
+name = "wispr-flow-linux-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Clean-room Linux helper for Wispr Flow: speaks the helper IPC contract over stdin (commands) / fd 3 (events) and backs the OS-integration commands with X11 (Wayland later)."
+license = "Unlicense"
+
+# Produces a single binary `wispr-flow-linux-helper` that drops into the app's
+# resources dir, mirroring the shipped macOS/Windows helpers. The Electron
+# main-process helper-path resolver needs a `'linux'` branch pointing at it
+# (see helper-contract/IPC_CONTRACT.md §8).
+[[bin]]
+name = "wispr-flow-linux-helper"
+path = "src/main.rs"
+
+[dependencies]
+# Pure-Rust X11 (speaks the XCB wire protocol directly over the socket — no
+# libxcb/libX11 dev headers required). Enables the XTEST extension for synthetic
+# key events and clipboard/selection + _NET_* property reads.
+x11rb = { version = "0.13", features = ["xtest", "xinput"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Raw uinput ioctls for the in-process Wayland virtual keyboard (backend::uinput).
+libc = "0.2"
+# Logging to stderr (fd 2 is the diagnostic channel; fd 1/stdout is non-IPC).
+log = "0.4"
+env_logger = "0.11"
+# D-Bus (pure-Rust, no libdbus) for the KDE/KWin active-window bridge: host a
+# tiny service that a KWin script pushes windowActivated events to, and call
+# org.kde.kwin.Scripting to load it. Blocking API matches the helper's threading.
+# Same crate family the `atspi` selection work will use later. Default features
+# include the async-io runtime + the blocking API used here.
+zbus = "4"
+# In-process Wayland clipboard owner (backend::wl_clipboard): offer text/plain +
+# text/html simultaneously via the focus-free ext-data-control protocol, instead
+# of shelling out to wl-copy (which can only serve one payload). Pure-Rust.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["staging", "client"] }
+
+# AT-SPI2 selection reads (backend::atspi_sel): the non-destructive path for
+# GetSelectedTextViaCopy — query the focused accessible's Text interface over the
+# a11y bus instead of synthesizing Ctrl+C. Pure-Rust (zbus); 0.22 pins zbus 4 so
+# it shares the single zbus 4.x already used by the KWin bridge (no duplicate).
+# The `tokio` feature is mandatory (atspi requires an async runtime); we drive it
+# from a tiny per-call current-thread runtime, so only `rt` + `time` are needed.
+atspi = { version = "0.22", default-features = false, features = ["proxies", "connection", "tokio"] }
+tokio = { version = "1", features = ["rt", "time"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
