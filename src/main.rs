@@ -65,6 +65,17 @@ fn spawn_fd3_writer(rx: mpsc::Receiver<Value>) -> std::thread::JoinHandle<()> {
 }
 
 fn main() {
+    // `--version`: print and exit before any service setup. This is the probe
+    // surface for `wispr-flow --doctor` — it proves the binary dynamically
+    // links and reaches main() (e.g. catches `GLIBC_… not found` aborts)
+    // without starting key capture, backend detection, or touching fd 3.
+    // stdout is safe here: this path is never taken when Electron spawns the
+    // helper (it passes no arguments).
+    if std::env::args().any(|a| a == "--version") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     // Logs go to stderr (fd 2). stdout (fd 1) must stay non-IPC.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)
