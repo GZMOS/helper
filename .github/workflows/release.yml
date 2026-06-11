@@ -20,9 +20,13 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - runner: ubuntu-latest
+          # Build on the oldest supported distro so the binary's glibc symbol
+          # floor stays low enough to run on it. Ubuntu 22.04 ships glibc 2.35;
+          # building on a newer image (e.g. ubuntu-latest → 24.04 / glibc 2.39)
+          # produces a binary that aborts on 22.04 with `GLIBC_2.39 not found`.
+          - runner: ubuntu-22.04
             suffix: x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04-arm
             suffix: aarch64
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -30,6 +34,15 @@ jobs:
         with:
           toolchain: stable
       - run: cargo build --release
+      - name: Assert glibc symbol floor (must run on Ubuntu 22.04)
+        run: |
+          max=$(objdump -T target/release/wispr-flow-linux-helper \
+            | grep -oP 'GLIBC_\d+\.\d+' | sort -uV | tail -1)
+          echo "Highest required glibc symbol: ${max:-none}"
+          if [ "$(printf '%s\nGLIBC_2.35\n' "$max" | sort -V | tail -1)" != "GLIBC_2.35" ]; then
+            echo "::error::Binary requires $max (> GLIBC_2.35); it will not run on Ubuntu 22.04."
+            exit 1
+          fi
       - name: Rename binary for upload
         run: |
           cp target/release/wispr-flow-linux-helper \
