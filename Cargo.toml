@@ -44,7 +44,12 @@ wayland-protocols = { version = "0.32", features = ["staging", "client"] }
 # The `tokio` feature is mandatory (atspi requires an async runtime); we drive it
 # from a tiny per-call current-thread runtime, so only `rt` + `time` are needed.
 atspi = { version = "0.22", default-features = false, features = ["proxies", "connection", "tokio"] }
-tokio = { version = "1", features = ["rt", "time"] }
+# `macros` adds tokio::select! (the portal backend multiplexes the Activated /
+# Deactivated signal streams against a config-mtime poll on one runtime thread).
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+# Stream combinators (StreamExt::next) for the zbus signal streams the
+# GlobalShortcuts portal backend consumes. Already in-tree via zbus.
+futures-util = { version = "0.3", default-features = false }
 
 [profile.release]
 opt-level = "z"

@@ -20,7 +20,9 @@
 //! expects (`keymap::evdev_to_vk`) — XInput2 keycodes are evdev codes + 8, so
 //! both paths converge on the same VK and the same emission code here.
 
+mod config;
 mod evdev;
+mod portal;
 mod xinput;
 
 use std::collections::HashSet;
@@ -48,9 +50,42 @@ impl HeldKeys for NoHeldKeys {
     }
 }
 
+/// Which Wayland capture backend to use, from `WISPR_CAPTURE`.
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureMode {
+    /// `org.freedesktop.portal.GlobalShortcuts` — the default. Compositor-
+    /// mediated, no device access, not a keylogging surface.
+    Portal,
+    /// `/dev/input` reader — the explicit opt-in for compositors without portal
+    /// support (wlroots/sway). Requires device read access; see [`evdev`].
+    Evdev,
+}
+
+/// Parse the `WISPR_CAPTURE` override. Default is [`CaptureMode::Portal`]; only
+/// `evdev` selects the device-reading path. Unknown values warn and default.
+/// (The variable is Wayland-scoped — X11 always uses the no-privilege XInput2
+/// path, so it's ignored there.)
+fn capture_mode() -> CaptureMode {
+    match std::env::var("WISPR_CAPTURE").ok().as_deref() {
+        Some("evdev") => CaptureMode::Evdev,
+        Some("portal") | None => CaptureMode::Portal,
+        Some("") => CaptureMode::Portal,
+        Some(other) => {
+            log::warn!("WISPR_CAPTURE={other:?} not recognized; using the portal default");
+            CaptureMode::Portal
+        }
+    }
+}
+
 /// Start global key capture. Spawns the reader(s) and returns a [`HeldKeys`]
-/// handle for stale-key queries. Prefers the no-privilege XInput2 path on a true
-/// X11 session, falling back to evdev (Wayland, or X11 where XInput2 fails).
+/// handle for stale-key queries. The backend is chosen per session:
+///
+/// - **true X11** — XInput2 (no device access), falling back to evdev.
+/// - **Wayland** — the GlobalShortcuts portal by default, or evdev when
+///   `WISPR_CAPTURE=evdev`. Portal failure does **not** fall back to evdev
+///   (that would silently reintroduce the device-read surface the default
+///   avoids); it logs and leaves capture off until the user opts in.
+/// - **headless / other** — evdev, the only session-agnostic option.
 pub fn spawn(events: EventSink) -> Box<dyn HeldKeys> {
     if is_true_x11_session() {
         match xinput::start(events.clone()) {
@@ -60,7 +95,36 @@ pub fn spawn(events: EventSink) -> Box<dyn HeldKeys> {
             }
             Err(e) => log::warn!("key capture: XInput2 unavailable ({e}); trying evdev"),
         }
+        return start_evdev(events);
     }
+
+    if is_wayland_session() {
+        return match capture_mode() {
+            CaptureMode::Portal => match portal::start(events) {
+                Ok(held) => held,
+                Err(e) => {
+                    log::error!(
+                        "key capture: GlobalShortcuts portal unavailable ({e}). \
+                         Push-to-talk and the shortcut recorder are OFF. If your \
+                         compositor has no portal support (e.g. sway/wlroots), set \
+                         WISPR_CAPTURE=evdev to use the device-reading fallback."
+                    );
+                    Box::new(NoHeldKeys)
+                }
+            },
+            CaptureMode::Evdev => {
+                log::info!("key capture: evdev (WISPR_CAPTURE=evdev)");
+                start_evdev(events)
+            }
+        };
+    }
+
+    // Headless / unknown session: evdev is the only thing that can work.
+    start_evdev(events)
+}
+
+/// evdev start with the no-readable-device case folded into [`NoHeldKeys`].
+fn start_evdev(events: EventSink) -> Box<dyn HeldKeys> {
     match evdev::start(events) {
         Some(held) => {
             log::info!("key capture: evdev (/dev/input)");
@@ -74,6 +138,12 @@ pub fn spawn(events: EventSink) -> Box<dyn HeldKeys> {
 /// set (XWayland), so require `WAYLAND_DISPLAY` to be absent.
 fn is_true_x11_session() -> bool {
     std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+/// True on a Wayland session (`WAYLAND_DISPLAY` set), where the portal is the
+/// default capture path.
+fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// Emit one `KeypressEvent` on fd 3. `index` is a process-wide monotonic

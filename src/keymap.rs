@@ -395,6 +395,80 @@ pub fn flag_to_evdev(flag: &str) -> Option<u16> {
     })
 }
 
+/// One token of an XDG shortcuts-spec trigger string: a modifier, or the single
+/// non-modifier ("base") key. The GlobalShortcuts portal (`capture::portal`)
+/// binds a trigger like `CTRL+LOGO+F9`; this is how a stored chord's VK codes
+/// become that string.
+enum XdgToken {
+    Ctrl,
+    Alt,
+    Shift,
+    Logo,
+    /// The base key's spec name (e.g. "a", "5", "F9", "space").
+    Key(String),
+}
+
+/// Classify one Windows VK code into its XDG trigger token, or None if we don't
+/// know how to name it in a trigger. Left/right modifier pairs collapse to the
+/// one keyword the spec uses (it has no left/right distinction in triggers).
+fn vk_to_xdg_token(vk: u32) -> Option<XdgToken> {
+    use XdgToken::{Alt, Ctrl, Key, Logo, Shift};
+    Some(match vk {
+        162 | 163 => Ctrl,  // left/right ctrl
+        160 | 161 => Shift, // left/right shift
+        164 | 165 => Alt,   // left/right alt
+        91 | 92 => Logo,    // left/right meta (super/win)
+        // Letters: VK 'A'..'Z' (65..=90) -> lowercase spec name.
+        65..=90 => Key(((b'a' + (vk - 65) as u8) as char).to_string()),
+        // Digits: VK '0'..'9' (48..=57) -> the digit character.
+        48..=57 => Key(((b'0' + (vk - 48) as u8) as char).to_string()),
+        // Function keys: VK 112..=135 -> F1..F24.
+        112..=135 => Key(format!("F{}", vk - 111)),
+        32 => Key("space".to_string()),
+        _ => return None,
+    })
+}
+
+/// Build an XDG shortcuts-spec trigger string (e.g. `CTRL+LOGO+F9`) from a
+/// stored shortcut's VK codes, for the GlobalShortcuts `preferred_trigger`.
+///
+/// Returns None when the chord can't be a portal trigger:
+///   * no base key (modifier-only, like the default Ctrl+Meta PTT) — KDE rejects
+///     these, so portal mode needs a real-key chord. The caller surfaces this.
+///   * more than one base key, or any unmappable code.
+///
+/// Modifiers are emitted in a fixed order (CTRL, ALT, SHIFT, LOGO) so the same
+/// chord always produces the same string; the base key comes last. The
+/// compositor normalizes/echoes its own `trigger_description` regardless.
+pub fn chord_to_xdg_trigger(vks: &[u32]) -> Option<String> {
+    let (mut ctrl, mut alt, mut shift, mut logo) = (false, false, false, false);
+    let mut key: Option<String> = None;
+    for &vk in vks {
+        match vk_to_xdg_token(vk)? {
+            XdgToken::Ctrl => ctrl = true,
+            XdgToken::Alt => alt = true,
+            XdgToken::Shift => shift = true,
+            XdgToken::Logo => logo = true,
+            XdgToken::Key(k) => {
+                if key.is_some() {
+                    return None; // two base keys can't be one trigger
+                }
+                key = Some(k);
+            }
+        }
+    }
+    // A trigger must have exactly one base key; modifier-only is rejected by KDE.
+    let key = key?;
+    let mut parts: Vec<&str> = Vec::new();
+    for (on, name) in [(ctrl, "CTRL"), (alt, "ALT"), (shift, "SHIFT"), (logo, "LOGO")] {
+        if on {
+            parts.push(name);
+        }
+    }
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
 /// Linux evdev codes for the modifier keys we snapshot/release around injection
 /// (the held-modifier dance in `backend::uinput::held_modifiers`).
 pub const EVDEV_MODIFIERS: &[u16] = &[
@@ -438,5 +512,42 @@ mod tests {
         assert_eq!(evdev_to_vk(42), Some(160)); // left shift
         assert_eq!(evdev_to_vk(56), Some(164)); // left alt
         assert_eq!(evdev_to_vk(125), Some(91)); // left meta (win)
+    }
+
+    /// Trigger strings: modifiers in fixed CTRL,ALT,SHIFT,LOGO order, base key
+    /// last. Left/right modifier pairs collapse to one keyword.
+    #[test]
+    fn chord_to_xdg_trigger_builds_spec_strings() {
+        // Ctrl(L)+Meta(L)+Z -> a realistic real-key PTT chord.
+        assert_eq!(
+            chord_to_xdg_trigger(&[162, 91, 90]).as_deref(),
+            Some("CTRL+LOGO+z")
+        );
+        // Right-hand modifiers collapse to the same keywords.
+        assert_eq!(
+            chord_to_xdg_trigger(&[163, 92, 90]).as_deref(),
+            Some("CTRL+LOGO+z")
+        );
+        // Fixed modifier order regardless of input order.
+        assert_eq!(
+            chord_to_xdg_trigger(&[91, 164, 162, 118]).as_deref(),
+            Some("CTRL+ALT+LOGO+F7")
+        );
+        // Function key and digit base keys.
+        assert_eq!(chord_to_xdg_trigger(&[162, 49]).as_deref(), Some("CTRL+1"));
+    }
+
+    /// The cases that must be rejected so the portal backend surfaces them rather
+    /// than binding something broken.
+    #[test]
+    fn chord_to_xdg_trigger_rejects_unbindable() {
+        // Modifier-only (the default Ctrl+Meta PTT) — KDE stores it as `none`.
+        assert_eq!(chord_to_xdg_trigger(&[162, 91]), None);
+        // Two base keys can't be one trigger.
+        assert_eq!(chord_to_xdg_trigger(&[65, 66]), None);
+        // An unmappable code taints the whole chord.
+        assert_eq!(chord_to_xdg_trigger(&[162, 9999]), None);
+        // Empty chord has no base key.
+        assert_eq!(chord_to_xdg_trigger(&[]), None);
     }
 }
